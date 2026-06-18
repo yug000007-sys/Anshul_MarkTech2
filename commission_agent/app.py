@@ -31,19 +31,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─── All 50 header columns (exact order from Header.xlsx) ─────────────────────
+# ─── All 79 header columns (exact order from Header.xlsx) ─────────────────────
 HEADER_COLS = [
-    "Distname", "Supplier_name", "direct_indirect", "in_out_territory",
-    "CustAccNbr", "CustDunsID", "CustName", "Address1", "City", "State",
-    "County", "Zip", "Phone", "Country", "NoOfEmployees", "WebAddress",
-    "SIC", "NAICS", "LineOfBusiness", "ParentName", "AccountType", "UOM",
-    "InvoiceNumber", "Qty", "UnitCost", "UnitResale", "InvoiceDate",
-    "DateRecieved", "PartNumberSubmitted", "PartNumberDescription", "Branch",
-    "SalesRep", "Latitude", "Longitude", "Brand", "PartNumberActual",
-    "UPCCode", "rawcustname", "rawdistaddress", "rawdistcity", "rawdiststate",
-    "rawdistpostalcode", "rawdistcountry", "currency", "contractID",
-    "client_CustName", "Zip_4_digit", "dnb_trade_style", "dnb_sales_value",
-    "google_CustName"
+    'Distname', 'Supplier_name', 'direct_indirect', 'in_out_territory',
+    'CustAccNbr', 'CustDunsID', 'CustName', 'Address1', 'City', 'State',
+    'County', 'Zip', 'Phone', 'Country', 'NoOfEmployees', 'WebAddress',
+    'SIC', 'NAICS', 'LineOfBusiness', 'ParentName', 'AccountType', 'UOM',
+    'InvoiceNumber', 'Qty', 'UnitCost', 'UnitResale', 'InvoiceDate',
+    'DateRecieved', 'PartNumberSubmitted', 'PartNumberDescription', 'Branch',
+    'SalesRep', 'Latitude', 'Longitude', 'Brand', 'PartNumberActual',
+    'UPCCode', 'rawcustname', 'rawdistaddress', 'rawdistcity', 'rawdiststate',
+    'rawdistpostalcode', 'rawdistcountry', 'currency', 'contractID',
+    'client_CustName', 'Zip_4_digit', 'dnb_trade_style', 'dnb_sales_value',
+    'google_CustName', 'google_Address1', 'google_State', 'google_Zip',
+    'google_Country', 'google_Phone', 'google_WebAddress', 'Pay_Month',
+    'Pay_Year', 'Ship_Month', 'Ship_Year', 'Industry', 'Commissions',
+    'Commission_Rate', 'Cust_AM', 'CEM', 'Sales', 'In_Out',
+    'Commission_split_percentage', 'Distributor_part_number', 'Category',
+    'google_City', 'Billings', 'Cheque_Number', 'Pay_Date', 'meta_data_json',
+    'SO_Number', 'PO_Number', 'ship_date', 'searched_on_google'
 ]
 
 # ─── Session State ─────────────────────────────────────────────────────────────
@@ -98,56 +104,115 @@ def sheets_to_text(sheets: dict) -> str:
 def map_to_header(data: dict) -> pd.DataFrame:
     """
     Map Part I (PDF) and Part II (Excel INTEGRA) rows
-    into the 50-column header format from Header.xlsx
+    into all 79 header columns from Header.xlsx
     """
     all_rows = []
 
-    # ── Part I: Regular Sales (from PDF) ──
+    p1_month = data.get("part1", {}).get("month", "")
+    p2_month = data.get("part2", {}).get("month", "")
+
+    # Parse month/year helpers
+    def get_month_year(label):
+        """e.g. 'December 2025' → (12, 2025)"""
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(label, "%B %Y")
+            return dt.month, dt.year
+        except:
+            return "", ""
+
+    p1_mon, p1_yr = get_month_year(p1_month)
+    p2_mon, p2_yr = get_month_year(p2_month)
+    comm_rate      = data.get("part2", {}).get("rate", 0.05)
+
+    # ── Part I: Regular Sales (from PDF) ──────────────────────────────────────
     for row in data.get("part1", {}).get("rows", []):
         r = {col: "" for col in HEADER_COLS}
-        r["Distname"]         = "MARCTECH2, INC."
-        r["Supplier_name"]    = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
-        r["direct_indirect"]  = "Direct"
-        r["CustAccNbr"]       = row.get("customer_number", "")
-        r["CustName"]         = row.get("customer_name", "")
-        r["State"]            = row.get("state", "")
-        r["InvoiceNumber"]    = row.get("invoice_number", "")
-        r["UnitCost"]         = row.get("unit_cost", "")       # Sales Amt from PDF
-        r["UnitResale"]       = ""                              # N/A for direct sales
-        r["InvoiceDate"]      = row.get("invoice_date", "")
-        r["SalesRep"]         = "MAR1"
-        r["currency"]         = "USD"
-        r["rawcustname"]      = row.get("customer_name", "")
-        r["client_CustName"]  = row.get("customer_name", "")
-        r["google_CustName"]  = row.get("customer_name", "")
-        r["Qty"]              = 1                               # direct invoice = 1 unit
-        r["PartNumberSubmitted"] = row.get("po_number", "")    # PO # stored here
+        # Identity
+        r["Distname"]          = "MARCTECH2, INC."
+        r["Supplier_name"]     = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
+        r["direct_indirect"]   = "Direct"
+        r["in_out_territory"]  = "In"
+        r["SalesRep"]          = "MAR1"
+        r["Branch"]            = "MAR1"
+        r["currency"]          = "USD"
+        # Customer
+        r["CustAccNbr"]        = row.get("customer_number", "")
+        r["CustName"]          = row.get("customer_name", "")
+        r["State"]             = row.get("state", "")
+        r["Country"]           = "US"
+        # Invoice
+        r["InvoiceNumber"]     = row.get("invoice_number", "")
+        r["InvoiceDate"]       = row.get("invoice_date", "")
+        r["Qty"]               = 1
+        r["UnitCost"]          = row.get("unit_cost", "")      # Sales Amt ✅
+        r["UnitResale"]        = ""                             # N/A for direct
+        r["Commissions"]       = row.get("commission", "")
+        r["Commission_Rate"]   = 0.05
+        r["Billings"]          = row.get("unit_cost", "")
+        # PO / Part
+        r["PO_Number"]         = row.get("po_number", "")
+        r["PartNumberSubmitted"] = row.get("po_number", "")
+        # Date fields
+        r["Pay_Month"]         = p1_mon
+        r["Pay_Year"]          = p1_yr
+        r["Ship_Month"]        = p1_mon
+        r["Ship_Year"]         = p1_yr
+        # Raw / client / google mirrors
+        r["rawcustname"]       = row.get("customer_name", "")
+        r["client_CustName"]   = row.get("customer_name", "")
+        r["google_CustName"]   = row.get("customer_name", "")
+        r["google_State"]      = row.get("state", "")
+        r["google_Country"]    = "US"
+        r["In_Out"]            = "In"
         all_rows.append(r)
 
-    # ── Part II: Distributor Sales (from Excel INTEGRA) ──
+    # ── Part II: Distributor Sales (from Excel INTEGRA) ───────────────────────
     for row in data.get("part2", {}).get("rows", []):
         r = {col: "" for col in HEADER_COLS}
-        r["Distname"]            = "MARCTECH2, INC."
-        r["Supplier_name"]       = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
-        r["direct_indirect"]     = "Indirect"
-        r["CustName"]            = row.get("customer_name", "")
-        r["City"]                = row.get("city", "")
-        r["State"]               = row.get("state", "")
-        r["Zip"]                 = row.get("zip", "")
-        r["InvoiceNumber"]       = row.get("invoice_number", "")
-        r["Qty"]                 = row.get("quantity", "")
-        r["UnitCost"]            = ""                           # not applicable for disty
-        r["UnitResale"]          = row.get("unit_sale", "")    # AB PRICE → UnitResale ✅
-        r["PartNumberSubmitted"] = row.get("part_number", "")
-        r["PartNumberActual"]    = row.get("part_number", "")
-        r["SalesRep"]            = "MAR1"
-        r["currency"]            = "USD"
-        r["rawcustname"]         = row.get("customer_name", "")
-        r["rawdistcity"]         = row.get("city", "")
-        r["rawdiststate"]        = row.get("state", "")
-        r["rawdistpostalcode"]   = row.get("zip", "")
-        r["client_CustName"]     = row.get("customer_name", "")
-        r["google_CustName"]     = row.get("customer_name", "")
+        # Identity
+        r["Distname"]          = "MARCTECH2, INC."
+        r["Supplier_name"]     = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
+        r["direct_indirect"]   = "Indirect"
+        r["in_out_territory"]  = "In"
+        r["SalesRep"]          = "MAR1"
+        r["Branch"]            = "MAR1"
+        r["currency"]          = "USD"
+        # Customer
+        r["CustName"]          = row.get("customer_name", "")
+        r["City"]              = row.get("city", "")
+        r["State"]             = row.get("state", "")
+        r["Zip"]               = row.get("zip", "")
+        r["Country"]           = "US"
+        # Invoice
+        r["InvoiceNumber"]     = row.get("invoice_number", "")
+        r["Qty"]               = row.get("quantity", "")
+        r["UnitCost"]          = ""                             # N/A for disty
+        r["UnitResale"]        = row.get("unit_sale", "")      # AB PRICE ✅
+        r["Commissions"]       = row.get("commission", "")
+        r["Commission_Rate"]   = comm_rate
+        r["Billings"]          = row.get("total_amount", "")
+        # Part number
+        r["PartNumberSubmitted"]   = row.get("part_number", "")
+        r["PartNumberActual"]      = row.get("part_number", "")
+        r["Distributor_part_number"] = row.get("part_number", "")
+        # Date fields
+        r["Pay_Month"]         = p1_mon
+        r["Pay_Year"]          = p1_yr
+        r["Ship_Month"]        = p2_mon
+        r["Ship_Year"]         = p2_yr
+        # Raw / client / google mirrors
+        r["rawcustname"]       = row.get("customer_name", "")
+        r["rawdistcity"]       = row.get("city", "")
+        r["rawdiststate"]      = row.get("state", "")
+        r["rawdistpostalcode"] = row.get("zip", "")
+        r["client_CustName"]   = row.get("customer_name", "")
+        r["google_CustName"]   = row.get("customer_name", "")
+        r["google_City"]       = row.get("city", "")
+        r["google_State"]      = row.get("state", "")
+        r["google_Zip"]        = row.get("zip", "")
+        r["google_Country"]    = "US"
+        r["In_Out"]            = "In"
         all_rows.append(r)
 
     df = pd.DataFrame(all_rows, columns=HEADER_COLS)
@@ -520,20 +585,41 @@ else:
         )
 
         st.markdown("---")
-        st.markdown("**Column mapping used:**")
+        st.markdown("**Column mapping used (all 79 columns):**")
         mapping_data = {
-            "Header Column":   ["Distname", "Supplier_name", "direct_indirect", "CustAccNbr", "CustName",
-                                 "City", "State", "Zip", "InvoiceNumber", "Qty",
-                                 "UnitCost", "UnitResale", "InvoiceDate", "PartNumberSubmitted",
-                                 "PartNumberActual", "SalesRep", "currency"],
-            "Part I Source (PDF)": ["MARCTECH2, INC.", "AMERICAN BRIGHT...", "Direct", "Customer#", "Name",
-                                     "—", "State", "—", "Invoice#", "1",
-                                     "Sales Amt ✅", "— (N/A)", "Inv. Dt", "PO #",
-                                     "—", "MAR1", "USD"],
-            "Part II Source (Excel)": ["MARCTECH2, INC.", "AMERICAN BRIGHT...", "Indirect", "—", "Company",
-                                        "City", "ST", "Zip", "AB. Inv. No.", "Qty",
-                                        "— (N/A)", "AB PRICE ✅", "—", "Item No.",
-                                        "Item No.", "MAR1", "USD"],
+            "Header Column": [
+                "Distname","Supplier_name","direct_indirect","in_out_territory",
+                "CustAccNbr","CustName","City","State","Zip","Country",
+                "InvoiceNumber","InvoiceDate","Qty","UnitCost","UnitResale",
+                "Commissions","Commission_Rate","Billings","PO_Number",
+                "PartNumberSubmitted","PartNumberActual","Distributor_part_number",
+                "SalesRep","Branch","currency","Pay_Month","Pay_Year",
+                "Ship_Month","Ship_Year","In_Out",
+                "rawcustname","rawdistcity","rawdiststate","rawdistpostalcode",
+                "client_CustName","google_CustName","google_City","google_State","google_Zip","google_Country",
+            ],
+            "Part I — PDF Source": [
+                "MARCTECH2, INC.","AMERICAN BRIGHT...","Direct","In",
+                "Customer#","Name","—","State","—","US",
+                "Invoice#","Inv. Dt","1 (direct)","Sales Amt ✅","—",
+                "Commission ($)","0.05","Sales Amt","PO #",
+                "PO #","—","—",
+                "MAR1","MAR1","USD","from PDF month","from PDF month",
+                "from PDF month","from PDF month","In",
+                "Name","—","State","—",
+                "Name","Name","—","State","—","US",
+            ],
+            "Part II — Excel Source": [
+                "MARCTECH2, INC.","AMERICAN BRIGHT...","Indirect","In",
+                "—","Company","City","ST","Zip","US",
+                "AB. Inv. No.","—","Qty","—","AB PRICE ✅",
+                "Qty×AB PRICE×Rate","Rate (DISTY SALES)","Qty×AB PRICE","—",
+                "Item No.","Item No.","Item No.",
+                "MAR1","MAR1","USD","from pay month","from pay month",
+                "from disty month","from disty month","In",
+                "Company","City","ST","Zip",
+                "Company","Company","City","ST","Zip","US",
+            ],
         }
         st.dataframe(pd.DataFrame(mapping_data), use_container_width=True, hide_index=True)
 
