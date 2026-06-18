@@ -28,9 +28,23 @@ st.markdown("""
 .main-header p  { color: rgba(255,255,255,0.75); margin: 0; font-size: 13px; }
 .ok-box   { background: rgba(34,197,94,0.08);  border: 1px solid rgba(34,197,94,0.2);  border-radius:10px; padding:12px 16px; margin-bottom:8px; }
 .err-box  { background: rgba(239,68,68,0.08);  border: 1px solid rgba(239,68,68,0.25); border-radius:10px; padding:14px 16px; margin-bottom:10px; }
-.warn-box { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.25);border-radius:10px; padding:14px 16px; margin-bottom:10px; }
 </style>
 """, unsafe_allow_html=True)
+
+# ─── All 50 header columns (exact order from Header.xlsx) ─────────────────────
+HEADER_COLS = [
+    "Distname", "Supplier_name", "direct_indirect", "in_out_territory",
+    "CustAccNbr", "CustDunsID", "CustName", "Address1", "City", "State",
+    "County", "Zip", "Phone", "Country", "NoOfEmployees", "WebAddress",
+    "SIC", "NAICS", "LineOfBusiness", "ParentName", "AccountType", "UOM",
+    "InvoiceNumber", "Qty", "UnitCost", "UnitResale", "InvoiceDate",
+    "DateRecieved", "PartNumberSubmitted", "PartNumberDescription", "Branch",
+    "SalesRep", "Latitude", "Longitude", "Brand", "PartNumberActual",
+    "UPCCode", "rawcustname", "rawdistaddress", "rawdistcity", "rawdiststate",
+    "rawdistpostalcode", "rawdistcountry", "currency", "contractID",
+    "client_CustName", "Zip_4_digit", "dnb_trade_style", "dnb_sales_value",
+    "google_CustName"
+]
 
 # ─── Session State ─────────────────────────────────────────────────────────────
 if "analysis"     not in st.session_state: st.session_state.analysis     = None
@@ -50,31 +64,16 @@ def fmtpct(n):
     try:    return f"{float(n)*100:.1f}%"
     except: return "—"
 
-# ─── PDF Parser ───────────────────────────────────────────────────────────────
-def parse_pdf(file_bytes: bytes) -> dict:
-    """
-    Extract from PDF:
-      Invoice#, Inv. Dt, PO#, Customer#, Name, Sales Amt (UnitCost), State, Commission
-    Returns: {"month_label": str, "rows": [...]}
-    """
+def extract_pdf_text(file_bytes: bytes) -> str:
     text = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
             if t:
                 text.append(t)
-    full_text = "\n".join(text)
-    return {"raw_text": full_text}
+    return "\n".join(text)
 
-
-# ─── Excel Parser ─────────────────────────────────────────────────────────────
-def parse_xlsx(file_bytes: bytes) -> dict:
-    """
-    Extract:
-      - COMM REPORT sheet  → summary (Part I amount/commission, Part II totals)
-      - DISTY SALES sheet  → commission rate per AB Inv No
-      - INTEGRA/distributor sheets → line items
-    """
+def extract_xlsx_sheets(file_bytes: bytes) -> dict:
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     sheets = {}
     for sheet in wb.sheetnames:
@@ -84,7 +83,6 @@ def parse_xlsx(file_bytes: bytes) -> dict:
             rows.append(list(row))
         sheets[sheet] = rows
     return sheets
-
 
 def sheets_to_text(sheets: dict) -> str:
     lines = []
@@ -96,6 +94,70 @@ def sheets_to_text(sheets: dict) -> str:
                 lines.append("\t".join(vals))
     return "\n".join(lines)
 
+# ─── Map extracted data → Header columns ──────────────────────────────────────
+def map_to_header(data: dict) -> pd.DataFrame:
+    """
+    Map Part I (PDF) and Part II (Excel INTEGRA) rows
+    into the 50-column header format from Header.xlsx
+    """
+    all_rows = []
+
+    # ── Part I: Regular Sales (from PDF) ──
+    for row in data.get("part1", {}).get("rows", []):
+        r = {col: "" for col in HEADER_COLS}
+        r["Distname"]         = "MARCTECH2, INC."
+        r["Supplier_name"]    = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
+        r["direct_indirect"]  = "Direct"
+        r["CustAccNbr"]       = row.get("customer_number", "")
+        r["CustName"]         = row.get("customer_name", "")
+        r["State"]            = row.get("state", "")
+        r["InvoiceNumber"]    = row.get("invoice_number", "")
+        r["UnitCost"]         = row.get("unit_cost", "")       # Sales Amt from PDF
+        r["UnitResale"]       = ""                              # N/A for direct sales
+        r["InvoiceDate"]      = row.get("invoice_date", "")
+        r["SalesRep"]         = "MAR1"
+        r["currency"]         = "USD"
+        r["rawcustname"]      = row.get("customer_name", "")
+        r["client_CustName"]  = row.get("customer_name", "")
+        r["google_CustName"]  = row.get("customer_name", "")
+        r["Qty"]              = 1                               # direct invoice = 1 unit
+        r["PartNumberSubmitted"] = row.get("po_number", "")    # PO # stored here
+        all_rows.append(r)
+
+    # ── Part II: Distributor Sales (from Excel INTEGRA) ──
+    for row in data.get("part2", {}).get("rows", []):
+        r = {col: "" for col in HEADER_COLS}
+        r["Distname"]            = "MARCTECH2, INC."
+        r["Supplier_name"]       = "AMERICAN BRIGHT OPTOELECTRONICS CORP."
+        r["direct_indirect"]     = "Indirect"
+        r["CustName"]            = row.get("customer_name", "")
+        r["City"]                = row.get("city", "")
+        r["State"]               = row.get("state", "")
+        r["Zip"]                 = row.get("zip", "")
+        r["InvoiceNumber"]       = row.get("invoice_number", "")
+        r["Qty"]                 = row.get("quantity", "")
+        r["UnitCost"]            = ""                           # not applicable for disty
+        r["UnitResale"]          = row.get("unit_sale", "")    # AB PRICE → UnitResale ✅
+        r["PartNumberSubmitted"] = row.get("part_number", "")
+        r["PartNumberActual"]    = row.get("part_number", "")
+        r["SalesRep"]            = "MAR1"
+        r["currency"]            = "USD"
+        r["rawcustname"]         = row.get("customer_name", "")
+        r["rawdistcity"]         = row.get("city", "")
+        r["rawdiststate"]        = row.get("state", "")
+        r["rawdistpostalcode"]   = row.get("zip", "")
+        r["client_CustName"]     = row.get("customer_name", "")
+        r["google_CustName"]     = row.get("customer_name", "")
+        all_rows.append(r)
+
+    df = pd.DataFrame(all_rows, columns=HEADER_COLS)
+    return df
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sheet1")
+    return buf.getvalue()
 
 # ─── Groq Analysis ────────────────────────────────────────────────────────────
 def run_analysis(pdf_text: str, xlsx_sheets: dict, api_key: str) -> dict:
@@ -112,69 +174,63 @@ def run_analysis(pdf_text: str, xlsx_sheets: dict, api_key: str) -> dict:
 ---
 You are a commission data extraction agent for MARCTECH2, INC. (Sales Rep MAR1).
 
-TASK: Extract structured data from the above files using these EXACT rules:
+TASK: Extract structured data using these EXACT rules:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART I — REGULAR SALES (extract from PDF)
+PART I — REGULAR SALES (from PDF)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For each transaction row in the PDF, extract:
-  - invoice_number     ← "Invoice#" column
-  - invoice_date       ← "Inv. Dt" column
-  - po_number          ← "PO #" column
-  - customer_number    ← "Customer#" column
-  - customer_name      ← "Name" column
-  - unit_cost          ← "Sales Amt" column (the dollar amount, NOT the percentage)
-  - state              ← "State" column (2-letter state code)
-  - commission         ← "Commission" column (the dollar amount, NOT the 5.00% figure)
+For each transaction row in the PDF extract:
+  - invoice_number   ← "Invoice#" column
+  - invoice_date     ← "Inv. Dt" column
+  - po_number        ← "PO #" column
+  - customer_number  ← "Customer#" column
+  - customer_name    ← "Name" column
+  - unit_cost        ← "Sales Amt" column (dollar amount only, NOT the % figure)
+  - state            ← "State" column
+  - commission       ← "Commission" column (dollar amount only, NOT the 5.00% figure)
 
 Also extract:
-  - part1_total_amount     ← "Sales Rep Total" payment amount
-  - part1_total_commission ← "Sales Rep Total" commission amount
-  - month_label            ← e.g. "December 2025" (from the date range in PDF header)
+  - total_amount       ← Sales Rep Total payment amount
+  - total_commission   ← Sales Rep Total commission amount
+  - month_label        ← e.g. "December 2025"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART II — DISTRIBUTOR SALES (extract from Excel)
+PART II — DISTRIBUTOR SALES (from Excel)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Step 1 — Get commission RATE from the DISTY SALES sheet:
-  - Find the "RATE" column value for each AB INV NO.
-  - This is the commission percentage (e.g. 0.05 = 5%)
-
-Step 2 — Get line items from the INTEGRA sheet (or any distributor sheet):
-For each row, extract:
-  - state          ← "ST" column
-  - zip            ← "Zip" column
-  - part_number    ← "Item No." column
-  - quantity       ← "Qty" column (integer)
-  - unit_sale      ← "AB PRICE" column (this is the price per unit)
-  - invoice_number ← "AB. Inv. No." column
-  - customer_name  ← "Company" column
-  - city           ← "City" column
-
-Step 3 — Calculate commission per row:
+Step 1 — Get commission RATE from DISTY SALES sheet (RATE column per AB INV NO.)
+Step 2 — Get line items from INTEGRA sheet:
+  - state          ← "ST"
+  - zip            ← "Zip"
+  - part_number    ← "Item No."
+  - quantity       ← "Qty"
+  - unit_sale      ← "AB PRICE"   ← this goes into UnitResale in the output
+  - invoice_number ← "AB. Inv. No."
+  - customer_name  ← "Company"
+  - city           ← "City"
+Step 3 — Calculate:
   - total_amount = quantity × unit_sale
-  - commission   = total_amount × rate   (rate from DISTY SALES for that invoice number)
+  - commission   = total_amount × rate
 
 Also extract:
-  - part2_month_label        ← month label from DISTY SALES sheet header (e.g. "November 2025")
-  - part2_total_amount       ← sum of all total_amounts
-  - part2_total_commission   ← sum of all commissions
+  - part2_month_label      ← month from DISTY SALES header
+  - part2_total_amount
+  - part2_total_commission
+  - rate                   ← the commission rate (e.g. 0.05)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMM REPORT SUMMARY (from COMM REPORT sheet)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  - comm_report_part1_amount      ← Part I AMOUNT value
-  - comm_report_part1_commission  ← Part I COMMISSION value
-  - comm_report_part2_amount      ← Part II AMOUNT value
-  - comm_report_part2_commission  ← Part II COMMISSION value
-  - comm_report_total_commission  ← TOTAL COMMISSION value
+  - comm_report_part1_amount
+  - comm_report_part1_commission
+  - comm_report_part2_amount
+  - comm_report_part2_commission
+  - comm_report_total_commission
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RECONCILIATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Check and report:
-  1. Does PDF Part I commission match COMM REPORT Part I commission? (tolerance $0.01)
-  2. Does calculated Part II commission match COMM REPORT Part II commission? (tolerance $0.01)
-  3. Any calculation errors in the distributor rows?
+  1. Does PDF Part I commission = COMM REPORT Part I commission? (tolerance $0.01)
+  2. Does calculated Part II commission = COMM REPORT Part II commission? (tolerance $0.01)
 
 Return this EXACT JSON (no markdown, no explanation):
 
@@ -239,33 +295,27 @@ Return this EXACT JSON (no markdown, no explanation):
         max_tokens=4000,
         temperature=0.1,
     )
-
     raw = response.choices[0].message.content
     raw = re.sub(r"```json|```", "", raw).strip()
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if match:
-        raw = match.group()
+    m = re.search(r'\{.*\}', raw, re.DOTALL)
+    if m: raw = m.group()
     return json.loads(raw)
 
 
-def chat_with_agent(question: str, context: dict, history: list, api_key: str) -> str:
+def chat_with_agent(question, context, history, api_key):
     client = Groq(api_key=api_key)
     system = (
         "You are a commission analysis assistant for MARCTECH2, INC. (Sales Rep MAR1). "
-        "Answer questions about the commission data clearly. Use dollar amounts and be specific.\n\n"
+        "Answer questions about commission data clearly. Use dollar amounts.\n\n"
         f"DATA:\n{json.dumps(context, indent=2)}"
-    ) if context else "No data analyzed yet. Ask the user to upload files first."
-
+    ) if context else "No data analyzed yet."
     messages = [{"role": "system", "content": system}]
     for h in history[-6:]:
         messages.append({"role": "user",      "content": h["user"]})
         messages.append({"role": "assistant", "content": h["assistant"]})
     messages.append({"role": "user", "content": question})
-
-    response = client.chat.completions.create(
-        model=GROQ_MODEL, messages=messages, max_tokens=800, temperature=0.3,
-    )
-    return response.choices[0].message.content
+    resp = client.chat.completions.create(model=GROQ_MODEL, messages=messages, max_tokens=800, temperature=0.3)
+    return resp.choices[0].message.content
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
@@ -279,7 +329,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("## 📂 Upload Files")
-
     pdf_file  = st.file_uploader("PDF — Comm_from_Payment",  type=["pdf"],         key="pdf_up")
     xlsx_file = st.file_uploader("Excel — Comm_Report",       type=["xlsx", "xls"], key="xl_up")
 
@@ -294,16 +343,12 @@ with st.sidebar:
 # ─── Run Analysis ─────────────────────────────────────────────────────────────
 if run and pdf_file and xlsx_file:
     with st.spinner("Reading files…"):
-        pdf_bytes  = pdf_file.read()
-        xlsx_bytes = xlsx_file.read()
-        pdf_data   = parse_pdf(pdf_bytes)
-        xlsx_data  = parse_xlsx(xlsx_bytes)
+        pdf_text   = extract_pdf_text(pdf_file.read())
+        xlsx_sheets = extract_xlsx_sheets(xlsx_file.read())
 
     with st.spinner("Extracting & reconciling with AI…"):
         try:
-            st.session_state.analysis = run_analysis(
-                pdf_data["raw_text"], xlsx_data, st.session_state.api_key
-            )
+            st.session_state.analysis = run_analysis(pdf_text, xlsx_sheets, st.session_state.api_key)
             st.success("Done!")
         except Exception as e:
             st.error(f"Failed: {e}")
@@ -320,157 +365,180 @@ data = st.session_state.analysis
 
 if not data:
     st.info("👈 Upload the PDF and Excel files in the sidebar, then click **Analyze & Reconcile**.")
-
     with st.expander("📋 Field Mapping Reference"):
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**From PDF → Part I (Regular Sales)**")
+            st.markdown("**PDF → Header columns (Part I)**")
             st.markdown("""
-| PDF Column | Field |
+| PDF Column | Header Column |
 |---|---|
-| Invoice# | Invoice Number |
-| Inv. Dt | Invoice Date |
-| PO # | PO Number |
-| Customer# | Customer Number |
-| Name | Customer Name |
-| Sales Amt | Unit Cost |
+| Invoice# | InvoiceNumber |
+| Inv. Dt | InvoiceDate |
+| PO # | PartNumberSubmitted |
+| Customer# | CustAccNbr |
+| Name | CustName |
+| Sales Amt | UnitCost |
 | State | State |
-| Commission | Commission ($) |
+| Commission | *(calculated)* |
 """)
         with col2:
-            st.markdown("**From Excel INTEGRA sheet → Part II (Distributor Sales)**")
+            st.markdown("**Excel INTEGRA → Header columns (Part II)**")
             st.markdown("""
-| Excel Column | Field |
+| Excel Column | Header Column |
 |---|---|
+| Company | CustName |
+| City | City |
 | ST | State |
 | Zip | Zip |
-| Item No. | Part Number |
-| Qty | Quantity |
-| AB PRICE | Unit Sale |
-| AB. Inv. No. | Invoice Number |
-| Company | Customer Name |
-| City | City |
-| DISTY SALES → RATE | Commission % |
+| Item No. | PartNumberSubmitted / PartNumberActual |
+| Qty | Qty |
+| **AB PRICE** | **UnitResale** ✅ |
+| AB. Inv. No. | InvoiceNumber |
 """)
-        st.info("**Commission formula:** Qty × AB PRICE = Total Amount → × Rate = Commission")
+        st.info("Commission = Qty × AB PRICE × Rate (from DISTY SALES sheet)")
 else:
-    p1   = data.get("part1", {})
-    p2   = data.get("part2", {})
-    cr   = data.get("comm_report", {})
-    rec  = data.get("reconciliation", {})
+    p1  = data.get("part1",       {})
+    p2  = data.get("part2",       {})
+    cr  = data.get("comm_report", {})
+    rec = data.get("reconciliation", {})
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Summary", "📄 Part I — Regular Sales",
-        "🏪 Part II — Distributor Sales", "💬 Ask AI"
+    # Build the header-mapped DataFrame
+    header_df = map_to_header(data)
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Summary",
+        "📄 Part I — Regular Sales",
+        "🏪 Part II — Distributor Sales",
+        "📋 Export (Header Format)",
+        "💬 Ask AI",
     ])
 
-    # ── Tab 1: Summary ──────────────────────────────────────────────────────
+    # ── Tab 1: Summary ───────────────────────────────────────────────────────
     with tab1:
         st.markdown(f"### Commission Statement — {data.get('month_label','')}")
-
         c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Part I — Regular Sales",
-                      fmt(cr.get("part1_amount", 0)),
-                      f"Commission: {fmt(cr.get('part1_commission', 0))}")
-        with c2:
-            st.metric("Part II — Distributor Sales",
-                      fmt(cr.get("part2_amount", 0)),
-                      f"Commission: {fmt(cr.get('part2_commission', 0))}")
-        with c3:
-            st.metric("💰 Total Commission",
-                      fmt(cr.get("total_commission", 0)))
+        c1.metric("Part I — Regular Sales",    fmt(cr.get("part1_amount", 0)),
+                  f"Commission: {fmt(cr.get('part1_commission', 0))}")
+        c2.metric("Part II — Distributor Sales", fmt(cr.get("part2_amount", 0)),
+                  f"Commission: {fmt(cr.get('part2_commission', 0))}")
+        c3.metric("💰 Total Commission",       fmt(cr.get("total_commission", 0)))
 
         st.markdown("---")
         st.markdown("### Reconciliation")
-
         status = rec.get("status", "ok")
-        issues = rec.get("issues", [])
-
         if status == "ok":
-            st.markdown('<div class="ok-box">✅ <strong>All figures reconcile perfectly</strong> — PDF, Excel, and calculated values all match.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="ok-box">✅ <strong>All figures reconcile perfectly.</strong></div>',
+                        unsafe_allow_html=True)
         else:
-            for issue in issues:
+            for issue in rec.get("issues", []):
                 st.markdown(f'<div class="err-box">⚠️ {issue}</div>', unsafe_allow_html=True)
 
-        recon_rows = [
-            {"Check": "Part I PDF Commission",     "Value": fmt(p1.get("total_commission")),          "COMM REPORT", fmt(cr.get("part1_commission")),  "Match": "✅" if rec.get("part1_match") else "❌"},
-            {"Check": "Part II Calculated Commission", "Value": fmt(p2.get("total_commission")),       "COMM REPORT": fmt(cr.get("part2_commission")), "Match": "✅" if rec.get("part2_match") else "❌"},
-        ]
-        # Simple two-row table
-        col_a, col_b, col_c, col_d = st.columns([3,2,2,1])
-        col_a.markdown("**Check**"); col_b.markdown("**Calculated**"); col_c.markdown("**COMM REPORT**"); col_d.markdown("**Match**")
-        col_a.write("Part I — PDF Commission");         col_b.write(fmt(p1.get("total_commission"))); col_c.write(fmt(cr.get("part1_commission"))); col_d.write("✅" if rec.get("part1_match") else "❌")
-        col_a.write("Part II — Distributor Commission");col_b.write(fmt(p2.get("total_commission"))); col_c.write(fmt(cr.get("part2_commission"))); col_d.write("✅" if rec.get("part2_match") else "❌")
+        col_a, col_b, col_c, col_d = st.columns([3, 2, 2, 1])
+        col_a.markdown("**Check**")
+        col_b.markdown("**Calculated**")
+        col_c.markdown("**COMM REPORT**")
+        col_d.markdown("**Match**")
+        col_a.write("Part I — PDF Commission")
+        col_b.write(fmt(p1.get("total_commission")))
+        col_c.write(fmt(cr.get("part1_commission")))
+        col_d.write("✅" if rec.get("part1_match") else "❌")
+        col_a.write("Part II — Distributor Commission")
+        col_b.write(fmt(p2.get("total_commission")))
+        col_c.write(fmt(cr.get("part2_commission")))
+        col_d.write("✅" if rec.get("part2_match") else "❌")
 
-    # ── Tab 2: Part I Regular Sales ─────────────────────────────────────────
+    # ── Tab 2: Part I ────────────────────────────────────────────────────────
     with tab2:
         st.markdown(f"### Part I — Regular Sales &nbsp; `{p1.get('month','')}`")
-        rows = p1.get("rows", [])
-        if rows:
-            df1 = pd.DataFrame(rows)
-            # Rename columns for display
-            rename_map = {
-                "invoice_number":  "Invoice #",
-                "invoice_date":    "Invoice Date",
+        rows1 = p1.get("rows", [])
+        if rows1:
+            df1 = pd.DataFrame(rows1).rename(columns={
+                "invoice_number":  "InvoiceNumber",
+                "invoice_date":    "InvoiceDate",
                 "po_number":       "PO #",
-                "customer_number": "Customer #",
-                "customer_name":   "Customer Name",
-                "unit_cost":       "Unit Cost",
+                "customer_number": "CustAccNbr",
+                "customer_name":   "CustName",
+                "unit_cost":       "UnitCost",
                 "state":           "State",
                 "commission":      "Commission",
-            }
-            df1 = df1.rename(columns=rename_map)
-            # Format money columns
-            for col in ["Unit Cost", "Commission"]:
+            })
+            for col in ["UnitCost", "Commission"]:
                 if col in df1.columns:
                     df1[col] = df1[col].apply(lambda x: f"${float(x):,.2f}" if x else "—")
             st.dataframe(df1, use_container_width=True, hide_index=True)
         else:
-            st.warning("No Part I rows extracted.")
-
-        st.markdown("---")
+            st.warning("No rows extracted.")
         c1, c2 = st.columns(2)
-        c1.metric("Total Sales Amount",     fmt(p1.get("total_amount")))
-        c2.metric("Total Commission (5%)",  fmt(p1.get("total_commission")))
+        c1.metric("Total Sales Amount",    fmt(p1.get("total_amount")))
+        c2.metric("Total Commission (5%)", fmt(p1.get("total_commission")))
 
-    # ── Tab 3: Part II Distributor Sales ────────────────────────────────────
+    # ── Tab 3: Part II ───────────────────────────────────────────────────────
     with tab3:
         st.markdown(f"### Part II — Distributor Sales &nbsp; `{p2.get('month','')}`")
-        st.caption(f"Commission rate from DISTY SALES sheet: **{fmtpct(p2.get('rate', 0.05))}**")
-        st.caption("Formula: **Qty × AB PRICE = Total Amount → × Rate = Commission**")
-
+        st.caption(f"Rate from DISTY SALES: **{fmtpct(p2.get('rate', 0.05))}** &nbsp;|&nbsp; Formula: Qty × AB PRICE × Rate = Commission")
         rows2 = p2.get("rows", [])
         if rows2:
-            df2 = pd.DataFrame(rows2)
-            rename2 = {
-                "invoice_number": "Invoice #",
-                "customer_name":  "Customer Name",
+            df2 = pd.DataFrame(rows2).rename(columns={
+                "invoice_number": "InvoiceNumber",
+                "customer_name":  "CustName",
                 "city":           "City",
                 "state":          "State",
                 "zip":            "Zip",
-                "part_number":    "Part Number",
+                "part_number":    "PartNumber",
                 "quantity":       "Qty",
-                "unit_sale":      "AB PRICE (Unit Sale)",
+                "unit_sale":      "UnitResale (AB PRICE)",
                 "total_amount":   "Total Amount",
                 "commission":     "Commission",
-            }
-            df2 = df2.rename(columns=rename2)
-            for col in ["AB PRICE (Unit Sale)", "Total Amount", "Commission"]:
+            })
+            for col in ["UnitResale (AB PRICE)", "Total Amount", "Commission"]:
                 if col in df2.columns:
-                    df2[col] = df2[col].apply(lambda x: f"${float(x):,.4f}" if col == "AB PRICE (Unit Sale)" else f"${float(x):,.2f}" if x else "—")
+                    df2[col] = df2[col].apply(lambda x: f"${float(x):,.4f}" if "PRICE" in col else f"${float(x):,.2f}" if x else "—")
             st.dataframe(df2, use_container_width=True, hide_index=True)
         else:
-            st.warning("No Part II rows extracted.")
+            st.warning("No rows extracted.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Rate",                     fmtpct(p2.get("rate", 0.05)))
+        c2.metric("Total Distributor Amount", fmt(p2.get("total_amount")))
+        c3.metric("Total Commission",         fmt(p2.get("total_commission")))
+
+    # ── Tab 4: Export ────────────────────────────────────────────────────────
+    with tab4:
+        st.markdown("### 📋 Data Mapped to Header Format")
+        st.caption("All 50 columns from Header.xlsx — AB PRICE mapped to **UnitResale**, Sales Amt to **UnitCost**.")
+
+        st.dataframe(header_df, use_container_width=True, hide_index=True)
+
+        # Download button
+        excel_bytes = to_excel_bytes(header_df)
+        month_label = data.get("month_label", "output").replace(" ", "_")
+        st.download_button(
+            label="⬇️ Download as Excel (Header Format)",
+            data=excel_bytes,
+            file_name=f"Commission_{month_label}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
         st.markdown("---")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rate",                  fmtpct(p2.get("rate", 0.05)))
-        c2.metric("Total Distributor Amount", fmt(p2.get("total_amount")))
-        c3.metric("Total Commission",      fmt(p2.get("total_commission")))
+        st.markdown("**Column mapping used:**")
+        mapping_data = {
+            "Header Column":   ["Distname", "Supplier_name", "direct_indirect", "CustAccNbr", "CustName",
+                                 "City", "State", "Zip", "InvoiceNumber", "Qty",
+                                 "UnitCost", "UnitResale", "InvoiceDate", "PartNumberSubmitted",
+                                 "PartNumberActual", "SalesRep", "currency"],
+            "Part I Source (PDF)": ["MARCTECH2, INC.", "AMERICAN BRIGHT...", "Direct", "Customer#", "Name",
+                                     "—", "State", "—", "Invoice#", "1",
+                                     "Sales Amt ✅", "— (N/A)", "Inv. Dt", "PO #",
+                                     "—", "MAR1", "USD"],
+            "Part II Source (Excel)": ["MARCTECH2, INC.", "AMERICAN BRIGHT...", "Indirect", "—", "Company",
+                                        "City", "ST", "Zip", "AB. Inv. No.", "Qty",
+                                        "— (N/A)", "AB PRICE ✅", "—", "Item No.",
+                                        "Item No.", "MAR1", "USD"],
+        }
+        st.dataframe(pd.DataFrame(mapping_data), use_container_width=True, hide_index=True)
 
-    # ── Tab 4: Ask AI ───────────────────────────────────────────────────────
-    with tab4:
+    # ── Tab 5: Ask AI ────────────────────────────────────────────────────────
+    with tab5:
         st.markdown("Ask anything about this commission statement.")
         for h in st.session_state.chat_history:
             with st.chat_message("user"):      st.write(h["user"])
