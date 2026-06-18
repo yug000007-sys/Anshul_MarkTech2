@@ -393,11 +393,7 @@ else:
             for issue in issues:
                 st.markdown(f'<div class="err-box">⚠️ {issue}</div>', unsafe_allow_html=True)
 
-        recon_rows = [
-            {"Check": "Part I PDF Commission",     "Value": fmt(p1.get("total_commission")),          "COMM REPORT", fmt(cr.get("part1_commission")),  "Match": "✅" if rec.get("part1_match") else "❌"},
-            {"Check": "Part II Calculated Commission", "Value": fmt(p2.get("total_commission")),       "COMM REPORT": fmt(cr.get("part2_commission")), "Match": "✅" if rec.get("part2_match") else "❌"},
-        ]
-        # Simple two-row table
+        # Simple two-row reconciliation table
         col_a, col_b, col_c, col_d = st.columns([3,2,2,1])
         col_a.markdown("**Check**"); col_b.markdown("**Calculated**"); col_c.markdown("**COMM REPORT**"); col_d.markdown("**Match**")
         col_a.write("Part I — PDF Commission");         col_b.write(fmt(p1.get("total_commission"))); col_c.write(fmt(cr.get("part1_commission"))); col_d.write("✅" if rec.get("part1_match") else "❌")
