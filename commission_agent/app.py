@@ -1,11 +1,11 @@
 import streamlit as st
 import pdfplumber
 import openpyxl
-import anthropic
 import json
 import io
 import re
 from pathlib import Path
+from groq import Groq
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -23,20 +23,12 @@ st.markdown("""
 .main-header {
     background: linear-gradient(135deg, #4f8ef7, #7c3aed);
     padding: 18px 24px; border-radius: 12px; margin-bottom: 24px;
-    display: flex; align-items: center; gap: 14px;
 }
 .main-header h1 { color: white; margin: 0; font-size: 22px; }
 .main-header p  { color: rgba(255,255,255,0.75); margin: 0; font-size: 13px; }
-.stat-box {
-    background: #1e2333; border: 1px solid #2a3048;
-    border-radius: 12px; padding: 18px 20px; text-align: center;
-}
-.stat-box .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.6px; }
-.stat-box .value { font-size: 28px; font-weight: 800; margin: 6px 0 4px; }
-.stat-box .sub   { font-size: 12px; color: #6b7280; }
-.ok-badge    { background: rgba(34,197,94,0.15);  color: #22c55e; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-.warn-badge  { background: rgba(245,158,11,0.15); color: #f59e0b; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-.err-badge   { background: rgba(239,68,68,0.15);  color: #ef4444; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.ok-badge   { background: rgba(34,197,94,0.15);  color: #22c55e; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.warn-badge { background: rgba(245,158,11,0.15); color: #f59e0b; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.err-badge  { background: rgba(239,68,68,0.15);  color: #ef4444; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
 .issue-box {
     background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
     border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
@@ -49,12 +41,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── Session State ─────────────────────────────────────────────────────────────
-if "analysis"      not in st.session_state: st.session_state.analysis      = None
-if "chat_history"  not in st.session_state: st.session_state.chat_history  = []
-if "api_key"       not in st.session_state:
-    # Auto-load from Streamlit Cloud secrets if available
-    try:    st.session_state.api_key = st.secrets["ANTHROPIC_API_KEY"]
+if "analysis"     not in st.session_state: st.session_state.analysis     = None
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "api_key"      not in st.session_state:
+    try:    st.session_state.api_key = st.secrets["GROQ_API_KEY"]
     except: st.session_state.api_key = ""
+
+GROQ_MODEL = "llama-3.3-70b-versatile"   # free, fast, smart
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def fmt(n):
@@ -82,17 +75,9 @@ def extract_xlsx_text(file_bytes: bytes) -> str:
                 lines.append("\t".join(row_vals))
     return "\n".join(lines)
 
-def status_badge(status: str) -> str:
-    if status == "ok":      return '<span class="ok-badge">✓ Match</span>'
-    if status == "warning": return '<span class="warn-badge">⚠ Warning</span>'
-    return '<span class="err-badge">✗ Error</span>'
-
-# ─── Claude Analysis ──────────────────────────────────────────────────────────
+# ─── Groq Analysis ────────────────────────────────────────────────────────────
 def run_analysis(file_data: list, api_key: str) -> dict:
-    """
-    file_data: list of {"name": str, "type": "pdf"|"xlsx", "text": str}
-    """
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
 
     files_block = "\n\n".join(
         f"--- FILE: {f['name']} ({f['type'].upper()}) ---\n{f['text']}"
@@ -107,7 +92,7 @@ You are a commission analysis agent for MARCTECH2, INC. (Sales Rep: MAR1) workin
 IMPORTANT CONTEXT:
 - PDF files ("Comm_from_Payment") show REGULAR SALES (Part I) — payments received in a specific month.
 - Excel files ("Comm_Report") have TWO parts:
-  * Part I (Regular Sales): for the CURRENT month — amount/commission should match the matching PDF.
+  * Part I (Regular Sales): for the CURRENT month — must match the matching PDF commission.
   * Part II (Distributor Sales): for the PREVIOUS month (one-month lag is intentional and correct).
 - Commission rate is consistently 5%.
 
@@ -157,27 +142,31 @@ YOUR TASK — analyze all files and return a JSON object with this EXACT structu
 }}
 
 RECONCILIATION RULES:
-- status "ok"      → PDF commission matches Excel Part I commission (within $0.01 tolerance)
-- status "warning" → minor discrepancy (<$5) OR one file is missing
+- status "ok"      → PDF commission matches Excel Part I commission (within $0.01)
+- status "warning" → minor discrepancy (<$5) OR one file missing
 - status "error"   → significant discrepancy (>=$5) OR clear mismatch
-- For each issue: {{"type": "mismatch"|"missing_pdf"|"missing_excel"|"calculation_error", "description": "...", "pdfValue": ..., "excelValue": ...}}
+- issues format: {{"type": "mismatch"|"missing_pdf"|"missing_excel"|"calculation_error", "description": "...", "pdfValue": 0, "excelValue": 0}}
 
-Return ONLY valid JSON. No markdown fences, no explanation.
-"""
+Return ONLY valid JSON. No markdown fences, no explanation text before or after."""
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
+        max_tokens=4000,
+        temperature=0.1,
     )
 
-    raw = "".join(b.text for b in response.content if hasattr(b, "text"))
+    raw = response.choices[0].message.content
     raw = re.sub(r"```json|```", "", raw).strip()
+    # Extract JSON if there's text before/after
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        raw = match.group()
     return json.loads(raw)
 
 
 def chat_with_agent(question: str, context: dict, history: list, api_key: str) -> str:
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
 
     system = (
         "You are a commission analysis assistant for MARCTECH2, INC. (Sales Rep MAR1). "
@@ -188,27 +177,28 @@ def chat_with_agent(question: str, context: dict, history: list, api_key: str) -
         "Ask the user to upload files and run analysis first."
     )
 
-    messages = []
-    for h in history[-6:]:   # last 3 turns
+    messages = [{"role": "system", "content": system}]
+    for h in history[-6:]:
         messages.append({"role": "user",      "content": h["user"]})
         messages.append({"role": "assistant", "content": h["assistant"]})
     messages.append({"role": "user", "content": question})
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=800,
-        system=system,
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
         messages=messages,
+        max_tokens=800,
+        temperature=0.3,
     )
-    return "".join(b.text for b in response.content if hasattr(b, "text"))
+    return response.choices[0].message.content
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
-    api_key = st.text_input("Anthropic API Key", type="password",
+    st.markdown("Get your **free** API key at [console.groq.com](https://console.groq.com)")
+    api_key = st.text_input("Groq API Key", type="password",
                              value=st.session_state.api_key,
-                             placeholder="sk-ant-…")
+                             placeholder="gsk_…")
     if api_key:
         st.session_state.api_key = api_key
 
@@ -233,7 +223,7 @@ with st.sidebar:
     run = st.button("⚡ Analyze & Reconcile", use_container_width=True,
                     disabled=not uploaded or not st.session_state.api_key)
     if not st.session_state.api_key:
-        st.caption("⚠️ Enter your API key above first.")
+        st.caption("⚠️ Enter your Groq API key above first.")
 
 # ─── Run Analysis ─────────────────────────────────────────────────────────────
 if run and uploaded:
@@ -243,14 +233,14 @@ if run and uploaded:
             raw = f.read()
             ext = Path(f.name).suffix.lower()
             if ext == ".pdf":
-                text = extract_pdf_text(raw)
+                text  = extract_pdf_text(raw)
                 ftype = "pdf"
             else:
-                text = extract_xlsx_text(raw)
+                text  = extract_xlsx_text(raw)
                 ftype = "xlsx"
             file_data.append({"name": f.name, "type": ftype, "text": text})
 
-    with st.spinner("Analyzing with Claude AI…"):
+    with st.spinner("Analyzing with Groq AI (LLaMA 3.3 70B)…"):
         try:
             st.session_state.analysis = run_analysis(file_data, st.session_state.api_key)
             st.success("Analysis complete!")
@@ -260,10 +250,8 @@ if run and uploaded:
 # ─── Main Content ─────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
-  <div>
-    <h1>📊 Commission Intelligence Agent</h1>
-    <p>MARCTECH2, INC. · American Bright Optoelectronics Corp. · Sales Rep: MAR1</p>
-  </div>
+  <h1>📊 Commission Intelligence Agent</h1>
+  <p>MARCTECH2, INC. · American Bright Optoelectronics Corp. · Sales Rep: MAR1 &nbsp;|&nbsp; Powered by Groq (Free)</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -296,6 +284,7 @@ else:
 
     # ── Tab 1: Summary ──────────────────────────────────────────────────────
     with tab1:
+        import pandas as pd
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("Regular Sales", fmt(summary.get("totalRegularSalesAmount", 0)),
@@ -317,7 +306,6 @@ else:
             st.info(insights)
 
         st.markdown("### Monthly Breakdown")
-        import pandas as pd
         rows = []
         for m in months:
             rows.append({
@@ -341,7 +329,7 @@ else:
             st.success("✅ All months reconciled perfectly — no discrepancies found.")
 
         for m in months:
-            rec = m.get("reconciliation", {})
+            rec    = m.get("reconciliation", {})
             status = rec.get("status", "ok")
             issues = rec.get("issues", [])
 
@@ -354,9 +342,9 @@ else:
                 )
             else:
                 for issue in issues:
-                    desc = issue.get("description", "")
-                    pv   = issue.get("pdfValue")
-                    xv   = issue.get("excelValue")
+                    desc   = issue.get("description", "")
+                    pv     = issue.get("pdfValue")
+                    xv     = issue.get("excelValue")
                     detail = f"<br><b>PDF:</b> {fmt(pv)}  &nbsp;·&nbsp;  <b>Excel:</b> {fmt(xv)}" if pv is not None else ""
                     st.markdown(
                         f'<div class="issue-box"><strong>⚠️ {m["month"]}</strong><br>{desc}{detail}</div>',
@@ -364,6 +352,7 @@ else:
                     )
 
         st.markdown("### Detail Table")
+        import pandas as pd
         rec_rows = []
         for m in months:
             pdf_comm = m.get("pdf",   {}).get("regularSalesCommission")
@@ -373,18 +362,18 @@ else:
                 "Month":          m["month"],
                 "PDF Found":      "✓" if m.get("pdf",   {}).get("found") else "✗",
                 "Excel Found":    "✓" if m.get("excel", {}).get("found") else "✗",
-                "PDF Comm.":      fmt(pdf_comm)  if pdf_comm is not None else "—",
-                "Excel P1 Comm.": fmt(xl_comm)   if xl_comm  is not None else "—",
-                "Difference":     fmt(diff)       if diff is not None else "—",
+                "PDF Comm.":      fmt(pdf_comm) if pdf_comm is not None else "—",
+                "Excel P1 Comm.": fmt(xl_comm)  if xl_comm  is not None else "—",
+                "Difference":     fmt(diff)      if diff     is not None else "—",
                 "Result":         m.get("reconciliation", {}).get("status", "").upper(),
             })
         st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
 
     # ── Tab 3: Full Report ──────────────────────────────────────────────────
     with tab3:
+        import pandas as pd
         for m in months:
             with st.expander(f"📅 {m['month']}", expanded=True):
-                # Part I
                 st.markdown("**Part I — Regular Sales**")
                 customers = m.get("pdf", {}).get("customers", [])
                 if customers:
@@ -400,7 +389,6 @@ else:
                 p1c = m.get("excel", {}).get("part1Commission") or m.get("pdf", {}).get("regularSalesCommission", 0)
                 st.caption(f"Part I Total: {fmt(p1a)}  |  Commission: {fmt(p1c)}")
 
-                # Part II
                 distys = m.get("excel", {}).get("part2Distributors", [])
                 if distys:
                     p2month = m.get("excel", {}).get("part2Month", "prior month")
@@ -425,7 +413,6 @@ else:
     with tab4:
         st.markdown("Ask anything about your commission data.")
 
-        # Display history
         for h in st.session_state.chat_history:
             with st.chat_message("user"):
                 st.write(h["user"])
@@ -435,7 +422,7 @@ else:
         question = st.chat_input("Ask about commissions, discrepancies, totals…")
         if question:
             if not st.session_state.api_key:
-                st.error("Enter your Anthropic API key in the sidebar.")
+                st.error("Enter your Groq API key in the sidebar.")
             else:
                 with st.chat_message("user"):
                     st.write(question)
